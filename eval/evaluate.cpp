@@ -185,6 +185,48 @@ void run_matrix(std::size_t workers, std::size_t tasks, int runs,
     }
 }
 
+// Scaling sweep: hold the workload fixed and vary the worker count over
+// 1,2,4,8,... up to max_workers, reporting work-stealing throughput, p50
+// latency, run-to-run spread, and parallel efficiency (throughput per worker
+// normalized to the 1-worker run). The spread column is the reproducibility
+// check (acceptance target: < 5%).
+void run_scaling(std::size_t max_workers, std::size_t tasks, int runs) {
+    // Worker counts: powers of two up to max, plus max itself if it is not one.
+    std::vector<std::size_t> counts;
+    for (std::size_t w = 1; w < max_workers; w *= 2) counts.push_back(w);
+    counts.push_back(max_workers);
+
+    // Heavier per-task work (a few microseconds) so the curve reflects the
+    // hardware, not per-task scheduling overhead: with trivial tasks a 20-worker
+    // pool is dominated by enqueue/steal traffic, not useful work.
+    constexpr int kScalingWork = 4096;
+
+    std::printf("=== Scaling: work-stealing, CPU-bound tasks (%d iters), "
+                "4 producers, median of %d runs ===\n", kScalingWork, runs);
+    std::printf("%8s %12s %10s %12s\n", "workers", "Mtasks/s", "spread%",
+                "efficiency");
+    std::printf("%s\n", std::string(46, '-').c_str());
+
+    double base = 0.0;  // 1-worker median throughput, for efficiency
+    for (std::size_t w : counts) {
+        { wsp::WorkStealingPool warm(w); (void)one_run(warm, tasks, 4, kScalingWork, false); }
+        std::vector<double> tput;
+        for (int r = 0; r < runs; ++r) {
+            wsp::WorkStealingPool pool(w);
+            tput.push_back(
+                one_run(pool, tasks, 4, kScalingWork, false).throughput_mps);
+        }
+        std::sort(tput.begin(), tput.end());
+        const double med = tput[tput.size() / 2];
+        const double spread =
+            med > 0 ? (tput.back() - tput.front()) / med * 100.0 : 0.0;
+        if (w == 1) base = med;
+        const double eff =
+            base > 0 ? (med / base) / static_cast<double>(w) * 100.0 : 0.0;
+        std::printf("%8zu %12.3f %9.1f%% %11.1f%%\n", w, med, spread, eff);
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -192,6 +234,7 @@ int main(int argc, char** argv) {
     std::size_t tasks = 500'000;
     int runs = 3;
     bool do_global = true, do_ws = true;
+    bool scaling = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -205,10 +248,12 @@ int main(int argc, char** argv) {
             const std::string p = next();
             do_global = (p == "global" || p == "both");
             do_ws = (p == "ws" || p == "both");
+        } else if (a == "--scaling") {
+            scaling = true;
         } else if (a == "--help" || a == "-h") {
             std::printf(
                 "usage: %s [--workers N] [--tasks N] [--runs N] "
-                "[--pool global|ws|both]\n",
+                "[--pool global|ws|both] [--scaling]\n",
                 argv[0]);
             return 0;
         } else {
@@ -222,6 +267,10 @@ int main(int argc, char** argv) {
     }
 
     std::printf("=== Work-Stealing Thread Pool — Evaluation ===\n");
-    run_matrix(workers, tasks, runs, do_global, do_ws);
+    if (scaling) {
+        run_scaling(workers, tasks, runs);
+    } else {
+        run_matrix(workers, tasks, runs, do_global, do_ws);
+    }
     return 0;
 }
