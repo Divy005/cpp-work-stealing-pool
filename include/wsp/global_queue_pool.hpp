@@ -31,6 +31,7 @@ public:
 
     void enqueue(Task task) override;
     void wait() override;
+    void shutdown(ShutdownMode mode = ShutdownMode::Drain) override;
     std::size_t worker_count() const override { return workers_.size(); }
     const char* name() const override { return "global-queue"; }
 
@@ -42,7 +43,12 @@ private:
     std::condition_variable queue_cv_;  // workers sleep here when idle
     TaskNode* head_ = nullptr;
     TaskNode* tail_ = nullptr;
-    bool stop_ = false;
+    bool stop_ = false;    // set by shutdown(): workers exit once the queue is
+                           // drained (Drain) or immediately (Cancel)
+    bool cancel_ = false;  // Cancel mode: drop the queued backlog, do not run it
+    bool joined_ = false;  // shutdown() ran to completion (idempotency guard)
+    // Best-effort gate: enqueue() becomes a no-op once shutdown has begun.
+    std::atomic<bool> accepting_{true};
 
     // ---- completion tracking ----
     // pending_ counts tasks submitted but not yet finished. Atomic so the

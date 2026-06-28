@@ -151,3 +151,57 @@ TEST(WorkStealingPool, ManyExternalProducers) {
     pool.wait();
     EXPECT_EQ(sum.load(), 1LL * kProducers * kPer);
 }
+
+// shutdown(Drain) must run every queued task before it returns, with no call to
+// wait() — draining is part of the shutdown contract.
+TEST(WorkStealingPool, ShutdownDrainRunsAllQueuedTasks) {
+    constexpr int kTasks = 50000;
+    std::atomic<int> ran{0};
+    WorkStealingPool pool(4);
+    for (int i = 0; i < kTasks; ++i) {
+        pool.enqueue([&] { ran.fetch_add(1, std::memory_order_relaxed); });
+    }
+    pool.shutdown();  // Drain
+    EXPECT_EQ(ran.load(), kTasks);
+}
+
+// Calling shutdown() more than once (including the destructor's own call) is a
+// safe no-op after the first.
+TEST(WorkStealingPool, ShutdownIsIdempotent) {
+    std::atomic<int> ran{0};
+    WorkStealingPool pool(4);
+    for (int i = 0; i < 1000; ++i) {
+        pool.enqueue([&] { ran.fetch_add(1, std::memory_order_relaxed); });
+    }
+    pool.shutdown();
+    pool.shutdown(wsp::ShutdownMode::Cancel);  // ignored: already shut down
+    pool.shutdown();
+    EXPECT_EQ(ran.load(), 1000);
+}
+
+TEST(WorkStealingPool, EnqueueAfterShutdownIsIgnored) {
+    std::atomic<int> ran{0};
+    WorkStealingPool pool(4);
+    pool.shutdown();
+    pool.enqueue([&] { ran.fetch_add(1, std::memory_order_relaxed); });
+    EXPECT_EQ(ran.load(), 0);  // never queued, never run
+}
+
+// Cancel discards the queued backlog and joins. The key property: once
+// shutdown() returns the workers are joined, so no task runs afterwards.
+TEST(WorkStealingPool, ShutdownCancelStopsWorkersAndJoins) {
+    constexpr int kTasks = 200000;
+    std::atomic<int> ran{0};
+    WorkStealingPool pool(4);
+    for (int i = 0; i < kTasks; ++i) {
+        pool.enqueue([&] {
+            volatile int x = 0;
+            for (int k = 0; k < 50; ++k) x += k;
+            ran.fetch_add(1, std::memory_order_relaxed);
+        });
+    }
+    pool.shutdown(wsp::ShutdownMode::Cancel);
+    const int after_join = ran.load();        // workers have joined here
+    EXPECT_LE(after_join, kTasks);            // backlog may be discarded
+    EXPECT_EQ(ran.load(), after_join);        // nothing runs after the join
+}

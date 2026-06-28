@@ -37,6 +37,7 @@ public:
 
     void enqueue(Task task) override;
     void wait() override;
+    void shutdown(ShutdownMode mode = ShutdownMode::Drain) override;
     std::size_t worker_count() const override { return workers_.size(); }
     const char* name() const override { return "work-stealing"; }
 
@@ -83,7 +84,13 @@ private:
     std::mutex idle_mtx_;
     std::condition_variable idle_cv_;
     std::atomic<int> idle_workers_{0};
-    bool stop_ = false;
+    bool stop_ = false;        // shutdown requested (guarded by idle_mtx_)
+    bool joined_ = false;      // shutdown() completed (idempotency guard)
+    // Cancel mode: workers stop pulling new work immediately. Read on the hot
+    // path each loop, so it is an atomic rather than guarded by idle_mtx_.
+    std::atomic<bool> cancel_{false};
+    // Best-effort gate: enqueue() becomes a no-op once shutdown has begun.
+    std::atomic<bool> accepting_{true};
 
     std::atomic<std::uint64_t> steals_{0};
     std::atomic<std::uint64_t> overflow_pushes_{0};

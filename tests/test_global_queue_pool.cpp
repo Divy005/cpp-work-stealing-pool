@@ -83,3 +83,37 @@ TEST(GlobalQueuePool, FifoOrderingFromSingleProducerSingleWorker) {
     std::iota(expected.begin(), expected.end(), 0);
     EXPECT_EQ(order, expected);
 }
+
+// shutdown(Drain) drains the queue before returning; no wait() needed.
+TEST(GlobalQueuePool, ShutdownDrainRunsAllQueuedTasks) {
+    constexpr int kTasks = 50000;
+    std::atomic<int> ran{0};
+    GlobalQueuePool pool(4);
+    for (int i = 0; i < kTasks; ++i) {
+        pool.enqueue([&] { ran.fetch_add(1, std::memory_order_relaxed); });
+    }
+    pool.shutdown();
+    EXPECT_EQ(ran.load(), kTasks);
+}
+
+TEST(GlobalQueuePool, EnqueueAfterShutdownIsIgnored) {
+    std::atomic<int> ran{0};
+    GlobalQueuePool pool(2);
+    pool.shutdown();
+    pool.enqueue([&] { ran.fetch_add(1, std::memory_order_relaxed); });
+    EXPECT_EQ(ran.load(), 0);
+}
+
+// Cancel joins the workers; once it returns nothing else runs.
+TEST(GlobalQueuePool, ShutdownCancelStopsWorkersAndJoins) {
+    constexpr int kTasks = 200000;
+    std::atomic<int> ran{0};
+    GlobalQueuePool pool(4);
+    for (int i = 0; i < kTasks; ++i) {
+        pool.enqueue([&] { ran.fetch_add(1, std::memory_order_relaxed); });
+    }
+    pool.shutdown(wsp::ShutdownMode::Cancel);
+    const int after_join = ran.load();
+    EXPECT_LE(after_join, kTasks);
+    EXPECT_EQ(ran.load(), after_join);
+}

@@ -55,21 +55,48 @@ WorkStealingPool::WorkStealingPool(std::size_t workers,
     }
 }
 
-WorkStealingPool::~WorkStealingPool() {
+WorkStealingPool::~WorkStealingPool() { shutdown(ShutdownMode::Drain); }
+
+void WorkStealingPool::shutdown(ShutdownMode mode) {
     {
         std::lock_guard<std::mutex> lk(idle_mtx_);
+        if (joined_) return;  // idempotent: already shut down
+        accepting_.store(false, std::memory_order_release);
+        if (mode == ShutdownMode::Cancel)
+            cancel_.store(true, std::memory_order_release);
         stop_ = true;
     }
     idle_cv_.notify_all();
     for (auto& t : workers_) {
         if (t.joinable()) t.join();
     }
-    // Drain any undrained overflow nodes (deques free themselves in their dtor).
+
+    // Workers have joined, so the deques and overflow list are ours alone now.
+    // Free any nodes that were never executed: none on Drain (workers ran them
+    // all before exiting), the discarded backlog on Cancel. Decrement pending_
+    // per freed node so a stray wait() observes zero instead of hanging.
+    for (auto& d : deques_) {
+        while (TaskNode* n = d->pop_back()) {
+            delete n;
+            pending_.fetch_sub(1, std::memory_order_acq_rel);
+        }
+    }
     for (TaskNode* n = overflow_head_; n != nullptr;) {
         TaskNode* next = n->next;
         delete n;
         n = next;
+        pending_.fetch_sub(1, std::memory_order_acq_rel);
     }
+    overflow_head_ = overflow_tail_ = nullptr;
+
+    {
+        std::lock_guard<std::mutex> lk(idle_mtx_);
+        joined_ = true;
+    }
+    {
+        std::lock_guard<std::mutex> lk(done_mtx_);
+    }
+    done_cv_.notify_all();
 }
 
 void WorkStealingPool::push_overflow(TaskNode* node) {
@@ -112,6 +139,7 @@ void WorkStealingPool::wake_one_worker() {
 }
 
 void WorkStealingPool::enqueue(Task task) {
+    if (!accepting_.load(std::memory_order_acquire)) return;  // shut down
     auto* node = new TaskNode(std::move(task));
     // Account for the task before it becomes visible to any worker, so wait()
     // cannot observe a premature zero. seq_cst (not relaxed) because this store
@@ -176,6 +204,11 @@ void WorkStealingPool::worker_loop(std::size_t index) {
 
     int idle_spins = 0;  // consecutive empty rounds, drives the backoff
     for (;;) {
+        // Cancel shutdown: stop pulling new work at once. Any task already
+        // running finished above, so this honours "in-flight tasks complete"
+        // while the queued backlog is left for shutdown() to discard.
+        if (cancel_.load(std::memory_order_acquire)) break;
+
         // 1. Own work first (LIFO, hottest in cache).
         TaskNode* node = deques_[index]->pop_back();
         // 2. Steal from a random victim.

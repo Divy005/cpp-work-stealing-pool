@@ -16,25 +16,43 @@ GlobalQueuePool::GlobalQueuePool(std::size_t workers) {
     }
 }
 
-GlobalQueuePool::~GlobalQueuePool() {
+GlobalQueuePool::~GlobalQueuePool() { shutdown(ShutdownMode::Drain); }
+
+void GlobalQueuePool::shutdown(ShutdownMode mode) {
     {
         std::lock_guard<std::mutex> lk(queue_mtx_);
+        if (joined_) return;  // idempotent: already shut down
+        accepting_.store(false, std::memory_order_release);
         stop_ = true;
+        if (mode == ShutdownMode::Cancel) cancel_ = true;
     }
     queue_cv_.notify_all();
     for (auto& t : workers_) {
         if (t.joinable()) t.join();
     }
-    // Drain any tasks that were submitted but never executed (e.g. pool
-    // destroyed without wait()). We free the nodes; we do not run them.
-    for (TaskNode* n = head_; n != nullptr;) {
-        TaskNode* next = n->next;
-        delete n;
-        n = next;
+    // Workers have joined, so the queue is now ours alone. Free any nodes that
+    // were never executed: none on Drain (workers ran them all), the discarded
+    // backlog on Cancel. Decrement pending_ per freed node so that a stray
+    // wait() observes zero instead of hanging forever.
+    {
+        std::lock_guard<std::mutex> lk(queue_mtx_);
+        for (TaskNode* n = head_; n != nullptr;) {
+            TaskNode* next = n->next;
+            delete n;
+            n = next;
+            pending_.fetch_sub(1, std::memory_order_acq_rel);
+        }
+        head_ = tail_ = nullptr;
+        joined_ = true;
     }
+    {
+        std::lock_guard<std::mutex> lk(done_mtx_);
+    }
+    done_cv_.notify_all();
 }
 
 void GlobalQueuePool::enqueue(Task task) {
+    if (!accepting_.load(std::memory_order_acquire)) return;  // shut down
     auto* node = new TaskNode(std::move(task));
     // Count the task before it becomes visible to a worker, otherwise a worker
     // could run and decrement pending_ before this increment lands, letting
@@ -59,8 +77,9 @@ void GlobalQueuePool::worker_loop() {
         {
             std::unique_lock<std::mutex> lk(queue_mtx_);
             queue_cv_.wait(lk, [this] { return stop_ || head_ != nullptr; });
-            if (head_ == nullptr) {
-                // Woken only because we are shutting down and the queue is empty.
+            if (cancel_ || head_ == nullptr) {
+                // Cancel mode drops the queued backlog; otherwise we were woken
+                // because the queue drained and we are shutting down.
                 assert(stop_);
                 return;
             }
