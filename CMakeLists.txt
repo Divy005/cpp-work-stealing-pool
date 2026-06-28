@@ -65,3 +65,9 @@ add_test(NAME wsp_tests COMMAND wsp_tests)
 # ---------------------------------------------------------------------------
 add_executable(wsp_bench bench/benchmark.cpp)
 target_link_libraries(wsp_bench PRIVATE wsp)
+
+# ---------------------------------------------------------------------------
+# Evaluation / inference harness (throughput + latency percentiles)
+# ---------------------------------------------------------------------------
+add_executable(wsp_eval eval/evaluate.cpp)
+target_link_libraries(wsp_eval PRIVATE wsp)
