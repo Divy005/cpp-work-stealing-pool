@@ -220,10 +220,29 @@ TaskNode* WorkStealingPool::try_steal(std::size_t self) {
     for (std::size_t k = 0; k < n; ++k) {
         const std::size_t victim = (start + k) % n;
         if (victim == self) continue;
-        if (TaskNode* node = deques_[victim]->steal_front()) {
-            steals_.fetch_add(1, std::memory_order_relaxed);
-            return node;
+
+        std::size_t count = 0;
+        TaskNode* chain = deques_[victim]->steal_half(count);
+        if (chain == nullptr) continue;
+
+        steals_.fetch_add(1, std::memory_order_relaxed);
+        stolen_tasks_.fetch_add(count, std::memory_order_relaxed);
+
+        // Keep the oldest node to run right now; stash the rest of the batch on
+        // our own (uncontended) deque so subsequent loop iterations pop them
+        // LIFO and cache-hot. The chain is linked by ->next; detach each node
+        // before re-inserting it. Our deque was empty, so the batch fits; the
+        // overflow path is a defensive fallback that should not trigger.
+        TaskNode* first = chain;
+        TaskNode* rest = first->next;
+        first->prev = first->next = nullptr;
+        while (rest != nullptr) {
+            TaskNode* next = rest->next;
+            rest->prev = rest->next = nullptr;
+            if (!deques_[self]->try_push_back(rest)) push_overflow(rest);
+            rest = next;
         }
+        return first;
     }
     return nullptr;
 }

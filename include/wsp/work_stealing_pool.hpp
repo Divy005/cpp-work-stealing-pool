@@ -43,8 +43,13 @@ public:
 
     // Observability (used by the eval harness / tests). Monotonic counters,
     // relaxed atomics — they are stats only and never gate correctness.
+    // Number of successful steal *operations* (each a batch of >= 1 task).
     std::uint64_t steals() const {
         return steals_.load(std::memory_order_relaxed);
+    }
+    // Total tasks moved by those steals (batch stealing makes this >= steals()).
+    std::uint64_t stolen_tasks() const {
+        return stolen_tasks_.load(std::memory_order_relaxed);
     }
     // Total steal sweeps attempted; steals()/steal_attempts() is the hit rate.
     std::uint64_t steal_attempts() const {
@@ -113,6 +118,7 @@ private:
     std::atomic<bool> accepting_{true};
 
     std::atomic<std::uint64_t> steals_{0};
+    std::atomic<std::uint64_t> stolen_tasks_{0};
     std::atomic<std::uint64_t> steal_attempts_{0};
     std::atomic<std::uint64_t> sleeps_{0};
     std::atomic<std::uint64_t> overflow_pushes_{0};

@@ -90,6 +90,8 @@ TEST(WorkStealingPool, SkewedLoadIsBalancedByStealing) {
     EXPECT_GT(pool.steals(), 0u) << "expected work to be stolen under skew";
     // A successful steal implies an attempt, so attempts must dominate steals.
     EXPECT_GE(pool.steal_attempts(), pool.steals());
+    // Each steal is a batch of >= 1 task, so tasks moved must dominate steals.
+    EXPECT_GE(pool.stolen_tasks(), pool.steals());
 }
 
 // Heavy recursion (fib-style task DAG): each task may spawn children. Verifies
