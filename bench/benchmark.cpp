@@ -92,9 +92,12 @@ void compare_flat(const char* title, std::size_t n, int producers, int work) {
     {
         wsp::WorkStealingPool pool;
         ws = bench_flat(pool, n, producers, work);
-        std::printf("%-14s workers=%zu  %.3f Mtasks/s  steals=%llu overflow=%llu\n",
+        std::printf("%-14s workers=%zu  %.3f Mtasks/s  "
+                    "steals=%llu/%llu sleeps=%llu overflow=%llu\n",
                     pool.name(), pool.worker_count(), ws / 1e6,
                     (unsigned long long)pool.steals(),
+                    (unsigned long long)pool.steal_attempts(),
+                    (unsigned long long)pool.sleeps(),
                     (unsigned long long)pool.overflow_pushes());
     }
     std::printf("  -> work-stealing speedup: %.2fx\n\n", ws / base);
@@ -120,9 +123,12 @@ int main() {
     {
         wsp::WorkStealingPool pool;
         ws_fan = bench_fanout(pool, kDepth, leaves);
-        std::printf("%-14s workers=%zu  %.3f Mtasks/s  steals=%llu\n",
+        std::printf("%-14s workers=%zu  %.3f Mtasks/s  "
+                    "steals=%llu/%llu sleeps=%llu\n",
                     pool.name(), pool.worker_count(), ws_fan / 1e6,
-                    (unsigned long long)pool.steals());
+                    (unsigned long long)pool.steals(),
+                    (unsigned long long)pool.steal_attempts(),
+                    (unsigned long long)pool.sleeps());
     }
     std::printf("  -> work-stealing speedup: %.2fx\n", ws_fan / base_fan);
     return 0;

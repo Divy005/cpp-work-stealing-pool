@@ -36,6 +36,14 @@ inline void cpu_relax() {
 #endif
 }
 
+// Idle backoff ladder for a worker that still sees pending_ > 0 (work exists,
+// just not grabbable this instant). A bounded spin with an exponentially growing
+// pause budget, escalating to cooperative yields. We deliberately never sleep
+// while pending_ > 0 so a deep recursive computation keeps every worker
+// saturated; sleeping is reserved for the genuinely-idle case below.
+constexpr int kMaxSpinShift = 10;  // pause budget caps at (1 << 10) == 1024
+constexpr int kYieldAfter = 20;    // after this many empty rounds, also yield()
+
 }  // namespace
 
 WorkStealingPool::WorkStealingPool(std::size_t workers,
@@ -172,6 +180,7 @@ void WorkStealingPool::enqueue(Task task) {
 TaskNode* WorkStealingPool::try_steal(std::size_t self) {
     const std::size_t n = deques_.size();
     if (n <= 1) return nullptr;
+    steal_attempts_.fetch_add(1, std::memory_order_relaxed);
     // Randomized starting victim avoids convoys where every thief hammers the
     // same deque.
     const std::size_t start =
@@ -232,10 +241,15 @@ void WorkStealingPool::worker_loop(std::size_t index) {
         // exponentially growing pause (escalating to yield()) to keep a thief
         // storm from starving the threads doing real work.
         if (pending_.load(std::memory_order_acquire) > 0) {
+            // Bounded exponential spin, escalating to yields (see the ladder
+            // constants above). Never sleep here: work exists and may surface
+            // at any moment, and grabbing it cheaply is what keeps recursive
+            // computations saturating all workers.
             ++idle_spins;
-            const int pauses = idle_spins < 10 ? (1 << idle_spins) : 1024;
-            for (int i = 0; i < pauses; ++i) cpu_relax();
-            if (idle_spins > 20) std::this_thread::yield();
+            const int shift =
+                idle_spins < kMaxSpinShift ? idle_spins : kMaxSpinShift;
+            for (int i = 0; i < (1 << shift); ++i) cpu_relax();
+            if (idle_spins > kYieldAfter) std::this_thread::yield();
             continue;
         }
         idle_spins = 0;
@@ -249,6 +263,7 @@ void WorkStealingPool::worker_loop(std::size_t index) {
         std::unique_lock<std::mutex> lk(idle_mtx_);
         idle_workers_.fetch_add(1, std::memory_order_seq_cst);
         if (pending_.load(std::memory_order_seq_cst) == 0 && !stop_) {
+            sleeps_.fetch_add(1, std::memory_order_relaxed);
             idle_cv_.wait(lk, [this] {
                 return stop_ || pending_.load(std::memory_order_acquire) > 0;
             });

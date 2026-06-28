@@ -46,6 +46,14 @@ public:
     std::uint64_t steals() const {
         return steals_.load(std::memory_order_relaxed);
     }
+    // Total steal sweeps attempted; steals()/steal_attempts() is the hit rate.
+    std::uint64_t steal_attempts() const {
+        return steal_attempts_.load(std::memory_order_relaxed);
+    }
+    // Times a worker parked on the idle CV (truly no pending work).
+    std::uint64_t sleeps() const {
+        return sleeps_.load(std::memory_order_relaxed);
+    }
     std::uint64_t overflow_pushes() const {
         return overflow_pushes_.load(std::memory_order_relaxed);
     }
@@ -93,6 +101,8 @@ private:
     std::atomic<bool> accepting_{true};
 
     std::atomic<std::uint64_t> steals_{0};
+    std::atomic<std::uint64_t> steal_attempts_{0};
+    std::atomic<std::uint64_t> sleeps_{0};
     std::atomic<std::uint64_t> overflow_pushes_{0};
 };
 
