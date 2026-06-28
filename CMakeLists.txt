@@ -59,3 +59,15 @@ add_executable(wsp_tests
 )
 target_link_libraries(wsp_tests PRIVATE wsp gtest_main)
 add_test(NAME wsp_tests COMMAND wsp_tests)
+
+# ---------------------------------------------------------------------------
+# Benchmark (custom harness; google-benchmark optional / not required)
+# ---------------------------------------------------------------------------
+add_executable(wsp_bench bench/benchmark.cpp)
+target_link_libraries(wsp_bench PRIVATE wsp)
+
+# ---------------------------------------------------------------------------
+# Evaluation / inference harness (throughput + latency percentiles)
+# ---------------------------------------------------------------------------
+add_executable(wsp_eval eval/evaluate.cpp)
+target_link_libraries(wsp_eval PRIVATE wsp)
