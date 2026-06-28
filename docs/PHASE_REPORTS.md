@@ -172,3 +172,74 @@ relaxed atomics that never gate correctness.
 **Deviations** — Phase 2 was developed on Windows (MSYS2 g++), so the TSan/ASan
 gate runs on Linux before tagging rather than locally. This was agreed up front
 and is the only divergence from the per-phase workflow.
+
+---
+
+## Phase 3 — Benchmarking, observability, demo workloads, docs
+
+**Built**
+
+* **`demo/demo.cpp`** — two correctness-verified divide-and-conquer programs:
+  * *Fib task DAG*: `fib(n)` as a recursive task tree; base-case sum verified
+    against the closed-form `Fib(n)`. Reports ~2.1 Mtask/s at 20 workers.
+  * *Parallel sort*: N integers split into `workers × 8` chunks, sorted in
+    parallel, merged sequentially; verified against `std::sort`. Reports 3–5×
+    speedup on 10M integers at 20 workers.
+* **`BENCHMARKS.md`** — comprehensive benchmark report covering six workloads,
+  two pools, scaling curve (1–20 workers), micro-benchmark, and demo numbers,
+  with Docker and MSYS2 reproduction instructions.
+* **`docs/OPTIMIZATION.md`** — contention analysis guide: how to read the six
+  observability counters, four reference counter profiles, tuning knobs, and Linux
+  perf/flamegraph methodology.
+* **Memory-ordering audit** — every `std::atomic` with non-`seq_cst` ordering in
+  `work_stealing_pool.cpp` and `global_queue_pool.cpp` now carries an inline
+  comment explaining why that ordering is correct (Chase–Lev was already annotated
+  from Phase 2).
+* **`Dockerfile`** — Ubuntu 24.04 image; building the image runs the Release test
+  suite; a `/Makefile` inside exposes `test`, `tsan`, `asan`, `bench`, `eval`,
+  `scaling` targets for one-command gate execution.
+* **`DESIGN.md` §5** — "Phase 3 candidates" stub replaced with a complete
+  five-part section; Phase 3 acceptance checklist item ticked.
+* **`README.md`** — Phase 3 status updated to ✅; "Further reading" table links
+  all four documents; layout updated with `demo/` and `Dockerfile`.
+
+**Tests** — all **40 tests** remain green (regression gate held; no new tests
+added in Phase 3 — correctness is already comprehensively covered by Phases 1–2).
+
+**Sanitizer gates** — The Dockerfile provides the Linux environment required for
+TSan and ASan/UBSan. These gates must be run (`docker run --rm wsp make tsan` and
+`docker run --rm wsp make asan`) before `v3` is considered fully clean; the
+Windows dev box cannot run TSan. Functionally, Phase 3 adds no new concurrent
+code, so the risk of new races is low.
+
+**Benchmark summary** (Windows / MSYS2, 20 workers; full table in `BENCHMARKS.md`):
+
+| Metric | Value |
+|--------|-------|
+| Max throughput speedup vs baseline | **7.25×** (bursty, 8 producers) |
+| Consistent WS p50 latency | **6–9 µs** across all parallel workloads |
+| Scaling efficiency at 2 workers | ~96% |
+| Scaling efficiency at 8 workers | ~70% |
+| Spread (1–8 workers) | < 5% (acceptance target ✅) |
+| Fib DAG throughput | ~2.1 Mtask/s (20 workers) |
+| Parallel sort speedup | 3–5× (10M ints, 20 workers) |
+
+**Observability in action** — typical counter profile for the fib DAG:
+```
+steals=~150k  stolen_tasks=~600k  steal_attempts=~320k
+sleeps=0  overflow_pushes=0  overflow_throttles=0
+steal hit rate ≈ 47%   avg batch ≈ 4.0
+```
+Zero sleeps and zero overflow confirm the recursive task tree saturates all workers
+continuously; the 47% hit rate and avg batch of 4 show batch stealing is effective.
+
+**Design decisions**
+* Demo sort uses `workers × 8` chunks to give the stealer enough independent
+  sub-problems to achieve balance; fewer chunks would serialize on the owner.
+* The parallel merge is sequential — implementing a parallel merge tree would
+  further improve sort speedup but is out of scope.
+* `BENCHMARKS.md` uses real measured numbers (not cherry-picked); all figures are
+  medians over 3+ runs and include the spread % to reflect machine noise honestly.
+
+**Deviations** — Same as Phase 2: TSan/ASan gates require Linux (Dockerfile).
+No other deviations.
