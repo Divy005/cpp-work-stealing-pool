@@ -11,13 +11,30 @@ artifact: the point is correct *and* fast concurrency infrastructure.
 | Phase | Description | State |
 |-------|-------------|-------|
 | **0** | Scaffold + baseline thread pool (single global FIFO queue) | ✅ done (`v0`) |
-| 1 | Work-stealing: per-worker intrusive deques + steal logic | in progress |
+| **1** | Work-stealing: per-worker intrusive deques + steal logic | ✅ done (`v1`) |
 | 2 | Lock-free / batch-steal / backoff refinements | planned |
 | 3 | Benchmark suite, observability, full design docs | planned |
 
-Phases 1–3 are scoped in [`DESIGN.md`](DESIGN.md).
+Phases 0–1 are implemented here. Phases 2–3 are scoped in
+[`DESIGN.md`](DESIGN.md) for a follow-up.
 
-## Architecture (target end state)
+## Results (median of 3 runs, 4 workers; see `docs/PHASE_REPORTS.md`)
+
+Work-stealing throughput speedup over the Phase 0 baseline, and task scheduling
+latency (enqueue → start of execution):
+
+| Workload | speedup | global p50 | work-stealing p50 |
+|----------|--------:|-----------:|------------------:|
+| recursive fan-out (2²⁰ tasks) | ~2.1x | — | — |
+| contended (4 producers, trivial) | ~2.0x | 9187 µs | **370 µs** |
+| producer/consumer (4 prod, ~300 ns) | ~1.4x | 17784 µs | **452 µs** |
+| bursty (8 producers, ~150 ns) | ~1.3x | 99040 µs | **1962 µs** |
+
+Numbers vary on a shared machine; the recursive win is the most stable.
+Single-producer trivial tasks are producer-bound (≈parity) — work-stealing helps
+when work is generated in parallel or recursively, which is its design purpose.
+
+## Architecture (current)
 
 ```
  caller (any thread) ── enqueue(task) ─┐

@@ -30,6 +30,7 @@ find_package(Threads REQUIRED)
 # ---------------------------------------------------------------------------
 add_library(wsp
   src/global_queue_pool.cpp
+  src/work_stealing_pool.cpp
 )
 target_include_directories(wsp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(wsp PUBLIC Threads::Threads)
@@ -53,6 +54,8 @@ enable_testing()
 
 add_executable(wsp_tests
   tests/test_global_queue_pool.cpp
+  tests/test_intrusive_deque.cpp
+  tests/test_work_stealing_pool.cpp
 )
 target_link_libraries(wsp_tests PRIVATE wsp gtest_main)
 add_test(NAME wsp_tests COMMAND wsp_tests)

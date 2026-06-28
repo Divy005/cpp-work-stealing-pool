@@ -65,7 +65,7 @@ section / phase report. It is deliberately slow and exists to be beaten.
 
 ---
 
-## 3. Phase 1 — work-stealing  (design; in progress)
+## 3. Phase 1 — work-stealing  ✅
 
 ### 3.1 Intrusive deque (`intrusive_deque.hpp`)
 
@@ -133,14 +133,37 @@ owner only contend when the deque has 0–1 elements.
   the shared overflow queue, which every idle worker also drains. Guarantees no
   drops and bounds per-deque memory.
 
-### 3.4 Idle / wakeup protocol
+### 3.4 Idle / wakeup protocol & memory ordering
 
-Workers that find no work anywhere block on a shared `condition_variable`.
-`enqueue` notifies it. To avoid lost wakeups without busy-spinning: a worker
-only sleeps when the global `pending_` counter is zero (genuinely nothing to
-do); if `pending_ > 0` but this worker found nothing, work exists in some other
-queue, so it yields and retries the steal loop rather than sleeping. `wait()`
-uses the same `pending_` counter and a separate completion CV.
+A worker that finds no work first **spins with exponential backoff** (a growing
+run of `pause` instructions, escalating to `yield()`) as long as `pending_ > 0`
+— work clearly exists somewhere and is cheap to grab once it surfaces; this is
+what keeps a deep recursive computation saturating all workers. The backoff
+keeps failed steals (each of which locks victim deques) from becoming a thief
+storm that starves the threads doing real work.
+
+When `pending_ == 0` there is genuinely nothing to do, so the worker **sleeps**
+on a shared `condition_variable` instead of burning a core.
+
+Avoiding lost wakeups without taking a global lock on every `enqueue` uses a
+**Dekker-style handshake** on two `seq_cst` atomics:
+
+* Producer (`enqueue` → `wake_one_worker`): `pending_.fetch_add(seq_cst)`, then
+  `idle_workers_.load(seq_cst)`. If it sees zero sleepers it skips the wakeup
+  entirely (the hot path under load).
+* Worker (about to sleep): `idle_workers_.fetch_add(seq_cst)`, then re-check
+  `pending_.load(seq_cst)`.
+
+By sequential consistency at least one side observes the other: either the
+producer sees `idle_workers_ > 0` and does the `lock(idle_mtx_)` + `notify`
+dance, or the about-to-sleep worker sees `pending_ > 0` and does not sleep. So
+no wakeup is lost, yet the common case costs only two atomics. On x86 the
+`fetch_add`s are already `lock`-prefixed RMWs, so `seq_cst` is free here.
+
+`wait()` uses the same `pending_` counter (incremented before a task is
+published, decremented `acq_rel` after it completes) and a separate completion
+CV; the worker that drives `pending_` to zero takes `done_mtx_` before notifying
+so that wakeup cannot be lost either.
 
 ---
 
@@ -202,7 +225,7 @@ contention report; Dockerfile for reproducible runs.
 
 - [x] **Phase 0:** builds `-Wall -Wextra -Wpedantic -Werror`; 1M tasks complete
   correctly; TSan clean; ASan/UBSan clean; baseline throughput recorded.
-- [ ] **Phase 1:** intrusive deque with asserted invariants; steal logic;
+- [x] **Phase 1:** intrusive deque with asserted invariants; steal logic;
   overflow fallback; throughput beats Phase 0 (multiplier recorded); skewed-load
   test passes via stealing; no task lost/duplicated; all Phase 0 tests still
   green; TSan + ASan/UBSan clean.
