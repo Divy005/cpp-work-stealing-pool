@@ -62,9 +62,11 @@ struct Result {
 using PoolFactory = std::function<std::unique_ptr<wsp::ThreadPool>()>;
 
 // One run: submit n_tasks from `producers` threads, each task does work_iters of
-// CPU work, and records its own scheduling latency.
+// CPU work, and records its own scheduling latency. When `skewed` is set, ~1/16
+// of the tasks do 16x the work, modelling an uneven load distribution that only
+// balances well if idle workers steal the backlog off the busy deques.
 Result one_run(wsp::ThreadPool& pool, std::size_t n, int producers,
-               int work_iters) {
+               int work_iters, bool skewed) {
     std::vector<double> latency(n, 0.0);
     std::atomic<std::size_t> done{0};
 
@@ -76,9 +78,11 @@ Result one_run(wsp::ThreadPool& pool, std::size_t n, int producers,
             for (std::size_t i = static_cast<std::size_t>(p); i < n;
                  i += static_cast<std::size_t>(producers)) {
                 const auto submit = Clock::now();
-                pool.enqueue([&, i, submit, work_iters] {
+                pool.enqueue([&, i, submit, work_iters, skewed] {
                     latency[i] = to_us(Clock::now() - submit);
-                    do_work(work_iters);
+                    int w = work_iters;
+                    if (skewed && (i % 16 == 0)) w *= 16;  // a few fat tasks
+                    do_work(w);
                     done.fetch_add(1, std::memory_order_relaxed);
                 });
             }
@@ -101,15 +105,15 @@ Result one_run(wsp::ThreadPool& pool, std::size_t n, int producers,
 }
 
 Result median_of_runs(const PoolFactory& make, std::size_t n, int producers,
-                      int work_iters, int runs) {
+                      int work_iters, bool skewed, int runs) {
     // One warmup run (touch pages, spin up threads) then `runs` measured runs.
-    { auto p = make(); (void)one_run(*p, n, producers, work_iters); }
+    { auto p = make(); (void)one_run(*p, n, producers, work_iters, skewed); }
 
     std::vector<Result> rs;
     rs.reserve(static_cast<std::size_t>(runs));
     for (int i = 0; i < runs; ++i) {
         auto p = make();
-        rs.push_back(one_run(*p, n, producers, work_iters));
+        rs.push_back(one_run(*p, n, producers, work_iters, skewed));
     }
     auto med_by = [&](double Result::*field) {
         std::vector<double> xs;
@@ -130,6 +134,7 @@ struct Workload {
     std::size_t tasks;
     int producers;
     int work_iters;
+    bool skewed;
 };
 
 void run_matrix(std::size_t workers, std::size_t tasks, int runs,
@@ -144,10 +149,12 @@ void run_matrix(std::size_t workers, std::size_t tasks, int runs,
     };
 
     const Workload workloads[] = {
-        {"uniform     (1 producer, trivial)", tasks, 1, 0},
-        {"contended   (4 producers, trivial)", tasks, 4, 0},
-        {"prod/cons   (4 producers, ~300ns)", tasks, 4, 64},
-        {"bursty      (8 producers, ~150ns)", tasks, 8, 32},
+        {"uniform     (1 producer, trivial)", tasks, 1, 0, false},
+        {"contended   (4 producers, trivial)", tasks, 4, 0, false},
+        {"prod/cons   (4 producers, ~300ns)", tasks, 4, 64, false},
+        {"sustained   (2 producers, ~600ns)", tasks, 2, 128, false},
+        {"bursty      (8 producers, ~150ns)", tasks, 8, 32, false},
+        {"skewed      (4 producers, 1/16 fat)", tasks, 4, 16, true},
     };
 
     std::printf("workers=%zu tasks=%zu runs=%d (median reported)\n\n",
@@ -160,13 +167,13 @@ void run_matrix(std::size_t workers, std::size_t tasks, int runs,
         Result g{}, s{};
         if (do_global) {
             g = median_of_runs(make_global, w.tasks, w.producers, w.work_iters,
-                               runs);
+                               w.skewed, runs);
             std::printf("%-36s %-14s %10.3f %8.2f %8.2f %8.2f\n", w.name,
                         "global-queue", g.throughput_mps, g.p50, g.p99, g.p999);
         }
         if (do_ws) {
             s = median_of_runs(make_ws, w.tasks, w.producers, w.work_iters,
-                               runs);
+                               w.skewed, runs);
             std::printf("%-36s %-14s %10.3f %8.2f %8.2f %8.2f", w.name,
                         "work-stealing", s.throughput_mps, s.p50, s.p99, s.p999);
             if (do_global && g.throughput_mps > 0) {

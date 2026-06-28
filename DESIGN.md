@@ -167,17 +167,60 @@ so that wakeup cannot be lost either.
 
 ---
 
-## 4. Phase 2 candidates (scoped, not implemented)
+## 4. Phase 2 — refinements (in progress)
 
-* Lock-free Chase–Lev deque (atomic top/bottom over a circular array) to remove
-  the owner-side lock entirely; `steal` via CAS on `top`.
-* **Batch stealing:** take half the victim's queue per steal to amortize the
-  synchronization cost.
-* **Backoff/throttling** on the overflow queue under overload.
-* Memory-ordering strategy: `relaxed` for the producer side of `pending_`,
-  `acq_rel`/`acquire` to publish/observe completion; deque indices would use
-  `acquire`/`release` pairs with a `seq_cst` fence only where steal/pop race on
-  the last element. Every non-`seq_cst` atomic gets an inline justification.
+Phase 2 optimizes the hot path and finesses the design, strictly on top of green
+Phase 1 tests. The chosen strategy is **staged, locks-first**: land the
+refinements that are both easy to reason about and verifiable on the dev machine,
+then add a lock-free deque as a clearly-flagged, *selectable* capstone (the
+lock-based deque stays the default). The spec allows "lock-free **or**
+fine-grained locking"; Phase 1's per-deque locks already make the owner path
+uncontended, so the lock-based refinements below are a complete, valid Phase 2 on
+their own.
+
+### 4.1 Evaluation matrix (done)
+The eval harness covers uniform / contended / producer-consumer / **sustained** /
+**bursty** / **skewed** (uneven — a few fat tasks) loads, reporting throughput
+and p50/p99/p99.9 scheduling latency, so each refinement is measured against the
+load shapes the acceptance criteria require.
+
+### 4.2 Graceful shutdown (planned)
+An explicit, idempotent `shutdown(mode)`: `Drain` finishes all queued + in-flight
+work then joins; `Cancel` lets in-flight tasks finish but discards the queued
+backlog (freeing its nodes) and joins promptly. The destructor delegates to
+`shutdown(Drain)`. `enqueue` after shutdown is ignored (never queued, never
+counted). RAII and the join-before-free invariant are preserved.
+
+### 4.3 Adaptive backoff (planned)
+Refine the idle worker loop into a bounded spin (`cpu_relax`) → `yield` → CV
+sleep ladder driven by consecutive empty rounds, with exposed steal-attempt /
+steal-success / sleep counters for observability. Goal: keep deep recursive
+computations saturating without a failed-steal thief storm.
+
+### 4.4 Overflow throttling (planned)
+Bound the overflow queue and back the producer off briefly when it is saturated,
+so a burst of external submissions cannot grow memory without limit and idle
+workers get a chance to drain it.
+
+### 4.5 Batch stealing (planned)
+`steal_half()` moves up to half the victim's nodes to the thief under a single
+lock acquisition, amortizing the synchronization cost; the thief runs one and
+pushes the rest onto its own deque. This is the main throughput lever for the
+heavy-external-production patterns.
+
+### 4.6 Lock-free Chase–Lev deque — capstone (planned, selectable)
+A textbook Chase–Lev deque (atomic `top`/`bottom` over a growable circular array)
+behind a selector, default off. Every atomic carries an inline memory-ordering
+justification; the single-element pop-vs-steal race is resolved by the standard
+CAS-on-`top`. Because TSan runs on Linux (not the Windows dev box), it ships with
+an exact-count race-stress test that catches lost/duplicated nodes functionally,
+and is validated under TSan before `v2` is tagged.
+
+### 4.7 Memory-ordering strategy
+`relaxed` for the producer side of `pending_` where a mutex already orders it;
+`acq_rel`/`acquire` to publish/observe completion; the Chase–Lev path uses
+`acquire`/`release` pairs with a `seq_cst` fence only where steal and pop race on
+the last element. Every non-`seq_cst` atomic gets an inline justification.
 
 ## 5. Phase 3 candidates (scoped, not implemented)
 
