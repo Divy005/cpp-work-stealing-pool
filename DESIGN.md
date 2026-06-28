@@ -281,7 +281,14 @@ contention report; Dockerfile for reproducible runs.
   overflow fallback; throughput beats Phase 0 (multiplier recorded); skewed-load
   test passes via stealing; no task lost/duplicated; all Phase 0 tests still
   green; TSan + ASan/UBSan clean.
-- [ ] Phase 2 / Phase 3: see §4–§5 (handed off).
+- [x] **Phase 2:** graceful shutdown (Drain/Cancel) with join semantics; adaptive
+  backoff with named tiers + steal/sleep observability; overflow throttling under
+  overload; batch stealing (`steal_half`); lock-free Chase–Lev capstone with an
+  exact-count race-stress test; all 40 tests green incl. every prior phase
+  (regression gate held); throughput improves on every parallel pattern (up to
+  7.25x, recorded in PHASE_REPORTS). TSan + ASan/UBSan run on Linux before tagging
+  (the Windows dev box has no TSan) — the one agreed workflow divergence.
+- [ ] Phase 3: see §5 (benchmarks, observability, Docker, final docs).
 
 ## 10. Benchmarks (recorded)
 

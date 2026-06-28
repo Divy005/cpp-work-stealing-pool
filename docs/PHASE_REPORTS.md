@@ -102,3 +102,73 @@ recursive result is the most stable. Phase 2 (batch stealing, adaptive backoff)
 targets the heavy-external-production case further.
 
 **Deviations** — none beyond the Phase 0 GoogleTest fetch note.
+
+---
+
+## Phase 2 — Refinements (shutdown, backoff, overflow throttling, batch stealing, lock-free capstone)
+
+Strategy: **staged, locks-first** (DESIGN §4). The spec permits lock-free *or*
+fine-grained locking, so the lock-based deque plus batch stealing is the
+production path and the lock-free Chase–Lev deque is a documented, standalone
+demonstration — keeping the default easy to follow and locally verifiable.
+
+**Built**
+* **Graceful shutdown** — `ShutdownMode{Drain,Cancel}` + idempotent `shutdown()`
+  on the interface and both pools. Drain finishes queued + in-flight work then
+  joins; Cancel finishes in-flight work, discards the backlog (freeing nodes and
+  reconciling `pending_` so a stray `wait()` can't hang), then joins promptly.
+  The destructor delegates to `shutdown(Drain)`; `enqueue` no-ops after shutdown.
+* **Adaptive backoff + observability** — the idle ladder (bounded exponential
+  spin → yield → CV sleep) now uses named tiers; new `steal_attempts()`,
+  `stolen_tasks()` and `sleeps()` counters expose the steal hit rate and parking
+  (printed by the benchmark).
+* **Overflow throttling** — the overflow queue has a soft cap (~one
+  deque-capacity per worker); an external producer backs off (bounded) when it
+  saturates, bounding memory under a submission storm. Worker submits are never
+  throttled and nothing is dropped.
+* **Batch stealing** — `IntrusiveDeque::steal_half()` moves up to half a victim's
+  deque under one lock; the thief runs the oldest task and stashes the rest on
+  its own deque, amortizing the victim-side steal lock over a run of work.
+* **Lock-free capstone** — `ChaseLevDeque`, a textbook fixed-capacity Chase–Lev
+  deque (atomic top/bottom, CAS steal, seq_cst CAS for the single-element tie),
+  every atomic justified inline. Standalone; does not replace the default deque.
+
+**Tests** — all **40 green** (was 22): +7 shutdown, +1 overflow throttling,
++3 `steal_half`, +7 Chase–Lev (including a 200k-node × 3-thief exact-count
+race-stress, clean over 25× repeat), plus observability assertions. Every
+Phase 0/1 test stays green (regression gate held).
+
+**Sanitizer gates** — Phase 2 was developed on a Windows / MSYS2 g++ 13.1.0 box
+where TSan is unavailable and ASan unreliable; per the agreed workflow the
+**TSan + ASan/UBSan gates run on Linux/CI before `v2` is tagged**. Functionally,
+the lock-free deque's exact-count race-stress test catches any lost/duplicated
+node.
+
+**Evaluation** (Windows dev box, 20 workers, gcc 13.1.0 `-O2`; eval harness =
+warmup + median of 3 runs, 200k tasks). Speedup over the Phase 0 baseline and
+work-stealing scheduling latency p50/p99/p99.9 (µs):
+
+| Workload | global Mtask/s | WS Mtask/s | speedup | WS p50 | WS p99 | WS p99.9 |
+|----------|---------------:|-----------:|--------:|-------:|-------:|---------:|
+| uniform (1 prod, trivial) | 0.039 | 0.038 | 0.96x | 8.5 | 73.7 | 108.7 |
+| contended (4 prod, trivial) | 0.045 | 0.099 | **2.18x** | 7.6 | 428.9 | 1065.8 |
+| prod/cons (4 prod, ~300ns) | 0.047 | 0.116 | **2.44x** | 6.5 | 266.6 | 890.3 |
+| sustained (2 prod, ~600ns) | 0.034 | 0.040 | 1.16x | 8.8 | 85.0 | 127.9 |
+| bursty (8 prod, ~150ns) | 0.108 | 0.782 | **7.25x** | 8.4 | 780.8 | 1849.1 |
+| skewed (4 prod, 1/16 fat) | 0.044 | 0.103 | **2.35x** | 6.3 | 157.3 | 529.1 |
+
+Work-stealing holds p50 scheduling latency at 6–9 µs across every pattern (vs
+12–18 µs for the global queue) and improves throughput on every parallel pattern
+(up to 7.25x bursty). Single-producer uniform is producer-bound (≈parity), as in
+Phase 1. These are 20-core Windows figures and differ from the 4-worker Linux
+numbers in the Phase 1 report; they are re-measured on Linux as part of the
+sanitizer gate.
+
+**Design decisions** — fixed-capacity Chase–Lev to avoid the growable-array
+reclamation hazard; batch stealing redistributes onto the thief's own
+(uncontended) deque; Cancel reconciles `pending_`; observability counters are
+relaxed atomics that never gate correctness.
+
+**Deviations** — Phase 2 was developed on Windows (MSYS2 g++), so the TSan/ASan
+gate runs on Linux before tagging rather than locally. This was agreed up front
+and is the only divergence from the per-phase workflow.

@@ -12,11 +12,21 @@ artifact: the point is correct *and* fast concurrency infrastructure.
 |-------|-------------|-------|
 | **0** | Scaffold + baseline thread pool (single global FIFO queue) | ✅ done (`v0`) |
 | **1** | Work-stealing: per-worker intrusive deques + steal logic | ✅ done (`v1`) |
-| 2 | Lock-free / batch-steal / backoff refinements | planned |
+| **2** | Graceful shutdown, adaptive backoff, overflow throttling, batch stealing, lock-free deque | ✅ done (`v2`) |
 | 3 | Benchmark suite, observability, full design docs | planned |
 
-Phases 0–1 are implemented here. Phases 2–3 are scoped in
-[`DESIGN.md`](DESIGN.md) for a follow-up.
+Phases 0–2 are implemented here. Phase 3 is scoped in [`DESIGN.md`](DESIGN.md)
+for a follow-up. Phase 2 adds:
+
+* **Graceful shutdown** — `shutdown(Drain|Cancel)` with join semantics (DESIGN §4.2).
+* **Adaptive backoff + observability** — named spin/yield/sleep tiers and
+  steal/sleep counters (§4.3).
+* **Overflow throttling** — a soft cap that backs producers off under overload (§4.4).
+* **Batch stealing** — `steal_half()` takes ~half a victim's deque per lock (§4.5).
+* **Lock-free Chase–Lev deque** — a standalone, fully-documented capstone (§4.6).
+
+Sanitizer note: Phase 2 was developed on Windows/MSYS2 g++, where TSan is
+unavailable; the TSan + ASan/UBSan gates are run on Linux before `v2` is tagged.
 
 ## Results (median of 3 runs, 4 workers; see `docs/PHASE_REPORTS.md`)
 
