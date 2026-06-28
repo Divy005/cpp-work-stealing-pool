@@ -44,6 +44,10 @@ inline void cpu_relax() {
 constexpr int kMaxSpinShift = 10;  // pause budget caps at (1 << 10) == 1024
 constexpr int kYieldAfter = 20;    // after this many empty rounds, also yield()
 
+// Overflow backoff: how many spin rounds an overwhelmed external producer waits
+// for workers to drain the overflow queue before pushing anyway (soft cap).
+constexpr int kMaxThrottleRounds = 64;
+
 }  // namespace
 
 WorkStealingPool::WorkStealingPool(std::size_t workers,
@@ -53,6 +57,9 @@ WorkStealingPool::WorkStealingPool(std::size_t workers,
         workers = std::thread::hardware_concurrency();
         if (workers == 0) workers = 1;
     }
+    // Soft cap on the overflow queue: roughly one deque-capacity of headroom per
+    // worker. Unbounded deques never overflow, so the cap is disabled (0) then.
+    overflow_cap_ = (deque_capacity_ == 0) ? 0 : deque_capacity_ * workers;
     deques_.reserve(workers);
     for (std::size_t i = 0; i < workers; ++i) {
         deques_.push_back(std::make_unique<IntrusiveDeque>(deque_capacity_));
@@ -96,6 +103,7 @@ void WorkStealingPool::shutdown(ShutdownMode mode) {
         pending_.fetch_sub(1, std::memory_order_acq_rel);
     }
     overflow_head_ = overflow_tail_ = nullptr;
+    overflow_size_.store(0, std::memory_order_relaxed);
 
     {
         std::lock_guard<std::mutex> lk(idle_mtx_);
@@ -116,6 +124,7 @@ void WorkStealingPool::push_overflow(TaskNode* node) {
         overflow_tail_->next = node;
         overflow_tail_ = node;
     }
+    overflow_size_.fetch_add(1, std::memory_order_relaxed);
 }
 
 TaskNode* WorkStealingPool::pop_overflow() {
@@ -125,7 +134,26 @@ TaskNode* WorkStealingPool::pop_overflow() {
     overflow_head_ = node->next;
     if (overflow_head_ == nullptr) overflow_tail_ = nullptr;
     node->next = node->prev = nullptr;
+    overflow_size_.fetch_sub(1, std::memory_order_relaxed);
     return node;
+}
+
+// Backpressure: if the overflow queue is at its soft cap, an external producer
+// spins (bounded) to give workers a chance to drain it before adding more. This
+// bounds memory under a submission storm and hands the CPU to the workers. The
+// cap is soft — after kMaxThrottleRounds we push anyway, so a task is never
+// dropped and the producer can never block indefinitely.
+void WorkStealingPool::throttle_overflow() {
+    if (overflow_cap_ == 0) return;  // unbounded: nothing to throttle
+    if (overflow_size_.load(std::memory_order_relaxed) < overflow_cap_) return;
+    overflow_throttles_.fetch_add(1, std::memory_order_relaxed);
+    for (int round = 0;
+         round < kMaxThrottleRounds &&
+         overflow_size_.load(std::memory_order_relaxed) >= overflow_cap_;
+         ++round) {
+        for (int i = 0; i < 64; ++i) cpu_relax();
+        std::this_thread::yield();
+    }
 }
 
 void WorkStealingPool::wake_one_worker() {
@@ -157,8 +185,9 @@ void WorkStealingPool::enqueue(Task task) {
     // free here.
     pending_.fetch_add(1, std::memory_order_seq_cst);
 
+    const bool from_worker = (t_ctx.pool == this);
     bool placed = false;
-    if (t_ctx.pool == this) {
+    if (from_worker) {
         // Recursive submission from a worker: keep it local and cache-hot.
         placed = deques_[t_ctx.index]->try_push_back(node);
     } else {
@@ -169,7 +198,10 @@ void WorkStealingPool::enqueue(Task task) {
     }
 
     if (!placed) {
-        // Deque full -> overflow fallback (never drop a task).
+        // Deque full -> overflow fallback (never drop a task). Throttle only an
+        // external producer; a worker thread must keep making progress and is
+        // never blocked here.
+        if (!from_worker) throttle_overflow();
         overflow_pushes_.fetch_add(1, std::memory_order_relaxed);
         push_overflow(node);
     }

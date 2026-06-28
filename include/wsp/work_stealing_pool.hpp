@@ -57,23 +57,35 @@ public:
     std::uint64_t overflow_pushes() const {
         return overflow_pushes_.load(std::memory_order_relaxed);
     }
+    // Times an external producer backed off because the overflow queue was at
+    // its soft cap (a sign the pool is being overwhelmed by submissions).
+    std::uint64_t overflow_throttles() const {
+        return overflow_throttles_.load(std::memory_order_relaxed);
+    }
 
 private:
     void worker_loop(std::size_t index);
     TaskNode* try_steal(std::size_t self);
     void push_overflow(TaskNode* node);
     TaskNode* pop_overflow();
+    void throttle_overflow();
     void wake_one_worker();
     void on_task_done();
 
     std::vector<std::unique_ptr<IntrusiveDeque>> deques_;
     std::vector<std::thread> workers_;
     std::size_t deque_capacity_;
+    // Soft cap on the overflow queue. 0 == unbounded (when deques are unbounded
+    // overflow is never used). Exceeding it makes external producers back off.
+    std::size_t overflow_cap_;
 
     // Overflow queue: intrusive FIFO guarded by its own mutex.
     std::mutex overflow_mtx_;
     TaskNode* overflow_head_ = nullptr;
     TaskNode* overflow_tail_ = nullptr;
+    // Current overflow length. Updated under overflow_mtx_ but read lock-free by
+    // throttle_overflow(), so it is atomic to keep that read race-free.
+    std::atomic<std::size_t> overflow_size_{0};
 
     // Round-robin target for external submissions.
     std::atomic<std::size_t> rr_{0};
@@ -104,6 +116,7 @@ private:
     std::atomic<std::uint64_t> steal_attempts_{0};
     std::atomic<std::uint64_t> sleeps_{0};
     std::atomic<std::uint64_t> overflow_pushes_{0};
+    std::atomic<std::uint64_t> overflow_throttles_{0};
 };
 
 }  // namespace wsp

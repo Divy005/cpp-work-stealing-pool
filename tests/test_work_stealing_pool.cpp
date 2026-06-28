@@ -189,6 +189,26 @@ TEST(WorkStealingPool, EnqueueAfterShutdownIsIgnored) {
     EXPECT_EQ(ran.load(), 0);  // never queued, never run
 }
 
+// Overload: a single slow worker with a tiny deque cannot keep up with a fast
+// producer, so the overflow queue saturates and the producer gets throttled.
+// Throttling must bound the backlog without ever dropping a task.
+TEST(WorkStealingPool, OverflowThrottlingUnderOverload) {
+    constexpr int kTasks = 100000;
+    WorkStealingPool pool(/*workers=*/1, /*deque_capacity=*/16);
+    std::atomic<int> done{0};
+    for (int i = 0; i < kTasks; ++i) {
+        pool.enqueue([&] {
+            volatile int x = 0;
+            for (int k = 0; k < 32; ++k) x += k;
+            done.fetch_add(1, std::memory_order_relaxed);
+        });
+    }
+    pool.wait();
+    EXPECT_EQ(done.load(), kTasks);
+    EXPECT_GT(pool.overflow_pushes(), 0u);     // overflow path was exercised
+    EXPECT_GT(pool.overflow_throttles(), 0u);  // producer hit the soft cap
+}
+
 // Cancel discards the queued backlog and joins. The key property: once
 // shutdown() returns the workers are joined, so no task runs afterwards.
 TEST(WorkStealingPool, ShutdownCancelStopsWorkersAndJoins) {
