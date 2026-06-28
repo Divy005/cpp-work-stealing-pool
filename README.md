@@ -13,20 +13,18 @@ artifact: the point is correct *and* fast concurrency infrastructure.
 | **0** | Scaffold + baseline thread pool (single global FIFO queue) | ✅ done (`v0`) |
 | **1** | Work-stealing: per-worker intrusive deques + steal logic | ✅ done (`v1`) |
 | **2** | Graceful shutdown, adaptive backoff, overflow throttling, batch stealing, lock-free deque | ✅ done (`v2`) |
-| 3 | Benchmark suite, observability, full design docs | planned |
+| **3** | Benchmark suite, demo workloads, observability docs, Dockerfile | ✅ done (`v3`) |
 
-Phases 0–2 are implemented here. Phase 3 is scoped in [`DESIGN.md`](DESIGN.md)
-for a follow-up. Phase 2 adds:
+All four phases are complete. Phase 3 adds:
 
-* **Graceful shutdown** — `shutdown(Drain|Cancel)` with join semantics (DESIGN §4.2).
-* **Adaptive backoff + observability** — named spin/yield/sleep tiers and
-  steal/sleep counters (§4.3).
-* **Overflow throttling** — a soft cap that backs producers off under overload (§4.4).
-* **Batch stealing** — `steal_half()` takes ~half a victim's deque per lock (§4.5).
-* **Lock-free Chase–Lev deque** — a standalone, fully-documented capstone (§4.6).
+* **Demo workloads** — fib task DAG and parallel sort, correctness-verified (`demo/demo.cpp`).
+* **Benchmark report** — throughput+latency matrix, scaling curve, micro-bench ([`BENCHMARKS.md`](BENCHMARKS.md)).
+* **Contention analysis** — counter profiles, tuning knobs, perf/flamegraph guide ([`docs/OPTIMIZATION.md`](docs/OPTIMIZATION.md)).
+* **Memory-ordering audit** — inline justification on every non-`seq_cst` atomic.
+* **Dockerfile** — Ubuntu 24.04 image for reproducible Linux builds and TSan/ASan/UBSan gates.
 
-Sanitizer note: Phase 2 was developed on Windows/MSYS2 g++, where TSan is
-unavailable; the TSan + ASan/UBSan gates are run on Linux before `v2` is tagged.
+Sanitizer note: the TSan + ASan/UBSan gates run inside the Docker container
+(Linux environment required for TSan); the Dockerfile provides the gate.
 
 ## Results (median of 3 runs, 4 workers; see `docs/PHASE_REPORTS.md`)
 
@@ -125,6 +123,17 @@ src/           pool implementations
 tests/         GoogleTest correctness + load tests
 bench/         throughput micro-benchmark
 eval/          evaluation/inference harness (throughput + latency percentiles)
+demo/          divide-and-conquer demo (fib DAG + parallel sort)
 scripts/       sanitizer + eval runner scripts
-docs/          design notes / phase reports
+docs/          design notes / phase reports / optimization guide
+Dockerfile     reproducible Linux build + TSan/ASan/UBSan gates
 ```
+
+## Further reading
+
+| Document | Contents |
+|----------|----------|
+| [`DESIGN.md`](DESIGN.md) | Architecture, data structures, steal algorithm, synchronization invariants, memory-ordering rationale, per-phase acceptance criteria |
+| [`BENCHMARKS.md`](BENCHMARKS.md) | Throughput + latency matrix, scaling curve, micro-benchmark, demo numbers, reproduction instructions |
+| [`docs/OPTIMIZATION.md`](docs/OPTIMIZATION.md) | Observability counter guide, contention analysis, tuning knobs, perf/flamegraph methodology |
+| [`docs/PHASE_REPORTS.md`](docs/PHASE_REPORTS.md) | Per-phase build log, test results, benchmark numbers, design decisions |

@@ -231,11 +231,46 @@ a short count) and is gated under TSan on Linux before `v2` is tagged.
 `acquire`/`release` pairs with a `seq_cst` fence only where steal and pop race on
 the last element. Every non-`seq_cst` atomic gets an inline justification.
 
-## 5. Phase 3 candidates (scoped, not implemented)
+## 5. Phase 3 — Benchmarking, observability, docs  ✅
 
-google-benchmark integration; workload matrix (uniform / bursty / skewed /
-producer-consumer / fib-DAG); scaling curves 1..N cores; flamegraph-driven
-contention report; Dockerfile for reproducible runs.
+### 5.1 Demo workloads (`demo/demo.cpp`)
+
+Two real divide-and-conquer programs driven by the pool, each timed and
+verified for correctness:
+
+* **Fibonacci task DAG** — the naive recursive `fib(n)` expressed as a task tree.
+  Every `fib(k)` spawns `fib(k-1)` and `fib(k-2)` as tasks; base cases accumulate
+  into a shared atomic. The sum equals `Fib(n)` (verified against the closed form),
+  so any lost or double-run task causes an immediate mismatch.
+* **Parallel sort** — splits N integers into `workers × 8` chunks, sorts each with
+  `std::sort` in parallel, then merges pairwise. Verified against a single-threaded
+  sort. Reports speedup and chunk count.
+
+### 5.2 Comprehensive benchmark report (`BENCHMARKS.md`)
+
+Covers four suites: throughput+latency matrix (6 workloads × 2 pools), scaling
+curve (1..N workers, <5% spread in the non-hyperthreading regime), micro-benchmark,
+and demo results. Includes noise-mitigation methodology and Docker reproduction
+instructions.
+
+### 5.3 Contention analysis (`docs/OPTIMIZATION.md`)
+
+Explains how to read and interpret all six observability counters, provides four
+reference counter profiles (healthy recursive, producer-bound, overloaded, skewed),
+documents tuning knobs, and describes the Linux perf/flamegraph methodology.
+
+### 5.4 Memory-ordering audit
+
+Every `std::atomic` used with non-`seq_cst` ordering now carries an inline comment
+explaining why that ordering is correct and sufficient. Chase–Lev deque was
+already fully annotated from Phase 2; the audit extended coverage to all
+`work_stealing_pool.cpp` and `global_queue_pool.cpp` call sites.
+
+### 5.5 Dockerfile
+
+Ubuntu 24.04 image with cmake + ninja. Building the image runs the Release test
+suite; a thin `/Makefile` inside exposes `test`, `tsan`, `asan`, `bench`, `eval`,
+and `scaling` targets for one-command reproduction of any gate.
 
 ---
 
@@ -288,7 +323,12 @@ contention report; Dockerfile for reproducible runs.
   (regression gate held); throughput improves on every parallel pattern (up to
   7.25x, recorded in PHASE_REPORTS). TSan + ASan/UBSan run on Linux before tagging
   (the Windows dev box has no TSan) — the one agreed workflow divergence.
-- [ ] Phase 3: see §5 (benchmarks, observability, Docker, final docs).
+- [x] **Phase 3:** demo workloads (fib DAG + parallel sort, correctness-verified);
+  comprehensive BENCHMARKS.md (throughput+latency matrix, scaling curve, micro-bench,
+  demo numbers); contention analysis in docs/OPTIMIZATION.md (counter profiles,
+  tuning knobs, perf/flamegraph methodology); full memory-ordering audit (inline
+  comment on every non-seq_cst atomic); Dockerfile for reproducible Linux
+  build + TSan + ASan/UBSan gates; DESIGN.md concurrency-model section finalized.
 
 ## 10. Benchmarks (recorded)
 
