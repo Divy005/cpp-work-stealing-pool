@@ -76,9 +76,9 @@ void WorkStealingPool::shutdown(ShutdownMode mode) {
     {
         std::lock_guard<std::mutex> lk(idle_mtx_);
         if (joined_) return;  // idempotent: already shut down
-        accepting_.store(false, std::memory_order_release);
+        accepting_.store(false, std::memory_order_release);  // pairs with acquire in enqueue()
         if (mode == ShutdownMode::Cancel)
-            cancel_.store(true, std::memory_order_release);
+            cancel_.store(true, std::memory_order_release);  // pairs with acquire in worker_loop
         stop_ = true;
     }
     idle_cv_.notify_all();
@@ -93,6 +93,8 @@ void WorkStealingPool::shutdown(ShutdownMode mode) {
     for (auto& d : deques_) {
         while (TaskNode* n = d->pop_back()) {
             delete n;
+            // acq_rel: synchronizes with any concurrent wait() that loaded
+            // pending_ with acquire; ensures freed nodes happen-before zero.
             pending_.fetch_sub(1, std::memory_order_acq_rel);
         }
     }
@@ -100,10 +102,10 @@ void WorkStealingPool::shutdown(ShutdownMode mode) {
         TaskNode* next = n->next;
         delete n;
         n = next;
-        pending_.fetch_sub(1, std::memory_order_acq_rel);
+        pending_.fetch_sub(1, std::memory_order_acq_rel);  // same as above
     }
     overflow_head_ = overflow_tail_ = nullptr;
-    overflow_size_.store(0, std::memory_order_relaxed);
+    overflow_size_.store(0, std::memory_order_relaxed);  // workers joined; sole thread
 
     {
         std::lock_guard<std::mutex> lk(idle_mtx_);
@@ -124,7 +126,7 @@ void WorkStealingPool::push_overflow(TaskNode* node) {
         overflow_tail_->next = node;
         overflow_tail_ = node;
     }
-    overflow_size_.fetch_add(1, std::memory_order_relaxed);
+    overflow_size_.fetch_add(1, std::memory_order_relaxed);  // always under overflow_mtx_; mutex orders
 }
 
 TaskNode* WorkStealingPool::pop_overflow() {
@@ -134,7 +136,7 @@ TaskNode* WorkStealingPool::pop_overflow() {
     overflow_head_ = node->next;
     if (overflow_head_ == nullptr) overflow_tail_ = nullptr;
     node->next = node->prev = nullptr;
-    overflow_size_.fetch_sub(1, std::memory_order_relaxed);
+    overflow_size_.fetch_sub(1, std::memory_order_relaxed);  // always under overflow_mtx_; mutex orders
     return node;
 }
 
@@ -145,11 +147,13 @@ TaskNode* WorkStealingPool::pop_overflow() {
 // dropped and the producer can never block indefinitely.
 void WorkStealingPool::throttle_overflow() {
     if (overflow_cap_ == 0) return;  // unbounded: nothing to throttle
+    // relaxed: this is a heuristic soft-cap check; a stale read is harmless —
+    // at worst we push one task too many or spin one extra round.
     if (overflow_size_.load(std::memory_order_relaxed) < overflow_cap_) return;
-    overflow_throttles_.fetch_add(1, std::memory_order_relaxed);
+    overflow_throttles_.fetch_add(1, std::memory_order_relaxed);  // stats only
     for (int round = 0;
          round < kMaxThrottleRounds &&
-         overflow_size_.load(std::memory_order_relaxed) >= overflow_cap_;
+         overflow_size_.load(std::memory_order_relaxed) >= overflow_cap_;  // relaxed: same rationale
          ++round) {
         for (int i = 0; i < 64; ++i) cpu_relax();
         std::this_thread::yield();
@@ -193,6 +197,7 @@ void WorkStealingPool::enqueue(Task task) {
     } else {
         // External submission: round-robin across deques to spread lock load.
         const std::size_t n = deques_.size();
+        // relaxed: round-robin ordering doesn't affect correctness; any spread is good.
         const std::size_t start = rr_.fetch_add(1, std::memory_order_relaxed) % n;
         placed = deques_[start]->try_push_back(node);
     }
@@ -202,7 +207,7 @@ void WorkStealingPool::enqueue(Task task) {
         // external producer; a worker thread must keep making progress and is
         // never blocked here.
         if (!from_worker) throttle_overflow();
-        overflow_pushes_.fetch_add(1, std::memory_order_relaxed);
+        overflow_pushes_.fetch_add(1, std::memory_order_relaxed);  // stats only
         push_overflow(node);
     }
 
@@ -212,7 +217,7 @@ void WorkStealingPool::enqueue(Task task) {
 TaskNode* WorkStealingPool::try_steal(std::size_t self) {
     const std::size_t n = deques_.size();
     if (n <= 1) return nullptr;
-    steal_attempts_.fetch_add(1, std::memory_order_relaxed);
+    steal_attempts_.fetch_add(1, std::memory_order_relaxed);  // stats only
     // Randomized starting victim avoids convoys where every thief hammers the
     // same deque.
     const std::size_t start =
@@ -225,8 +230,8 @@ TaskNode* WorkStealingPool::try_steal(std::size_t self) {
         TaskNode* chain = deques_[victim]->steal_half(count);
         if (chain == nullptr) continue;
 
-        steals_.fetch_add(1, std::memory_order_relaxed);
-        stolen_tasks_.fetch_add(count, std::memory_order_relaxed);
+        steals_.fetch_add(1, std::memory_order_relaxed);           // stats only
+        stolen_tasks_.fetch_add(count, std::memory_order_relaxed);  // stats only
 
         // Keep the oldest node to run right now; stash the rest of the batch on
         // our own (uncontended) deque so subsequent loop iterations pop them
@@ -314,11 +319,13 @@ void WorkStealingPool::worker_loop(std::size_t index) {
         std::unique_lock<std::mutex> lk(idle_mtx_);
         idle_workers_.fetch_add(1, std::memory_order_seq_cst);
         if (pending_.load(std::memory_order_seq_cst) == 0 && !stop_) {
-            sleeps_.fetch_add(1, std::memory_order_relaxed);
+            sleeps_.fetch_add(1, std::memory_order_relaxed);  // stats only
             idle_cv_.wait(lk, [this] {
                 return stop_ || pending_.load(std::memory_order_acquire) > 0;
             });
         }
+        // relaxed: we are about to re-enter the loop where the next iteration
+        // re-checks pending_ with acquire; no ordering needed for the counter itself.
         idle_workers_.fetch_sub(1, std::memory_order_relaxed);
         if (stop_ && pending_.load(std::memory_order_acquire) == 0) break;
     }

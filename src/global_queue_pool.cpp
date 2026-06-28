@@ -22,7 +22,7 @@ void GlobalQueuePool::shutdown(ShutdownMode mode) {
     {
         std::lock_guard<std::mutex> lk(queue_mtx_);
         if (joined_) return;  // idempotent: already shut down
-        accepting_.store(false, std::memory_order_release);
+        accepting_.store(false, std::memory_order_release);  // pairs with acquire in enqueue()
         stop_ = true;
         if (mode == ShutdownMode::Cancel) cancel_ = true;
     }
@@ -40,6 +40,7 @@ void GlobalQueuePool::shutdown(ShutdownMode mode) {
             TaskNode* next = n->next;
             delete n;
             n = next;
+            // acq_rel: keeps freed-node work before a concurrent wait()'s acquire load.
             pending_.fetch_sub(1, std::memory_order_acq_rel);
         }
         head_ = tail_ = nullptr;
@@ -56,7 +57,8 @@ void GlobalQueuePool::enqueue(Task task) {
     auto* node = new TaskNode(std::move(task));
     // Count the task before it becomes visible to a worker, otherwise a worker
     // could run and decrement pending_ before this increment lands, letting
-    // wait() observe a spurious zero.
+    // wait() observe a spurious zero. Relaxed because the task is published under
+    // queue_mtx_, whose lock/unlock already provides the necessary ordering.
     pending_.fetch_add(1, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lk(queue_mtx_);
