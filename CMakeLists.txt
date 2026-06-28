@@ -72,3 +72,9 @@ target_link_libraries(wsp_bench PRIVATE wsp)
 # ---------------------------------------------------------------------------
 add_executable(wsp_eval eval/evaluate.cpp)
 target_link_libraries(wsp_eval PRIVATE wsp)
+
+# ---------------------------------------------------------------------------
+# Demo: fib task-DAG + parallel pool-sort (divide-and-conquer workloads)
+# ---------------------------------------------------------------------------
+add_executable(wsp_demo demo/demo.cpp)
+target_link_libraries(wsp_demo PRIVATE wsp)
