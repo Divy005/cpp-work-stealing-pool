@@ -1,0 +1,15 @@
+# Build output
+build/
+build-*/
+cmake-build-*/
+
+# Editor / OS cruft
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Profiling artifacts
+perf.data*
+*.svg
+flamegraph*
