@@ -105,6 +105,37 @@ public:
         return node;
     }
 
+    // THIEF (batch): move up to half (ceil, so at least one) of the oldest nodes
+    // off the FRONT under a *single* lock acquisition, returning them as a chain
+    // linked by ->next (front-to-back, null-terminated); out_count is how many
+    // were taken. Returns nullptr / out_count 0 when empty.
+    //
+    // This is the batch-stealing primitive: one synchronization op transfers a
+    // whole run of work instead of N separate steal_front calls each locking the
+    // victim. Like steal_front it is correct down to a single element, because
+    // pop_back and steal_half are mutually exclusive under mtx_.
+    TaskNode* steal_half(std::size_t& out_count) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        out_count = 0;
+        if (front_ == nullptr) return nullptr;
+        const std::size_t take = (size_ + 1) / 2;  // ceil(size/2), always >= 1
+        TaskNode* head = front_;
+        TaskNode* tail = head;
+        for (std::size_t i = 1; i < take; ++i) tail = tail->next;
+        // Detach [head .. tail] from the front.
+        front_ = tail->next;
+        if (front_ == nullptr) {
+            back_ = nullptr;  // took everything
+        } else {
+            front_->prev = nullptr;
+        }
+        tail->next = nullptr;  // null-terminate the detached chain
+        head->prev = nullptr;
+        size_ -= take;
+        out_count = take;
+        return head;  // caller owns [head .. tail], walks it via ->next
+    }
+
     std::size_t size() const {
         std::lock_guard<std::mutex> lk(mtx_);
         return size_;

@@ -104,6 +104,64 @@ TEST(IntrusiveDeque, MixedPushPopKeepsLinksConsistent) {
     d.validate();
 }
 
+// steal_half takes ceil(size/2) of the oldest nodes, in FIFO order, leaving the
+// newer half on the deque (still drained LIFO by the owner).
+TEST(IntrusiveDeque, StealHalfTakesOldestFrontHalf) {
+    IntrusiveDeque d;
+    int sink = 0;
+    for (int i = 0; i < 10; ++i) ASSERT_TRUE(d.try_push_back(make_node(i, &sink)));
+    std::size_t count = 0;
+    TaskNode* chain = d.steal_half(count);
+    ASSERT_NE(chain, nullptr);
+    EXPECT_EQ(count, 5u);       // ceil(10/2)
+    EXPECT_EQ(d.size(), 5u);
+    d.validate();
+    // Stolen chain is the oldest five in FIFO order: 0,1,2,3,4.
+    int expected = 0;
+    for (TaskNode* n = chain; n != nullptr;) {
+        n->task();
+        EXPECT_EQ(sink, expected++);
+        TaskNode* nx = n->next;
+        delete n;
+        n = nx;
+    }
+    EXPECT_EQ(expected, 5);
+    // The owner still holds 5..9 and pops them LIFO: 9,8,7,6,5.
+    for (int e = 9; e >= 5; --e) {
+        TaskNode* n = d.pop_back();
+        ASSERT_NE(n, nullptr);
+        n->task();
+        EXPECT_EQ(sink, e);
+        delete n;
+    }
+    EXPECT_TRUE(d.empty());
+    d.validate();
+}
+
+TEST(IntrusiveDeque, StealHalfOfOneTakesIt) {
+    IntrusiveDeque d;
+    int sink = 0;
+    ASSERT_TRUE(d.try_push_back(make_node(7, &sink)));
+    std::size_t count = 0;
+    TaskNode* chain = d.steal_half(count);
+    ASSERT_NE(chain, nullptr);
+    EXPECT_EQ(count, 1u);
+    EXPECT_EQ(chain->next, nullptr);
+    chain->task();
+    EXPECT_EQ(sink, 7);
+    delete chain;
+    EXPECT_TRUE(d.empty());
+    d.validate();
+}
+
+TEST(IntrusiveDeque, StealHalfOfEmptyReturnsNull) {
+    IntrusiveDeque d;
+    std::size_t count = 123;
+    EXPECT_EQ(d.steal_half(count), nullptr);
+    EXPECT_EQ(count, 0u);
+    d.validate();
+}
+
 // Concurrency: one owner pushing/popping the back while many thieves steal from
 // the front. Every node must be taken exactly once (no loss, no double-take).
 // Run under TSan this also asserts the per-deque lock makes the deque race-free.
