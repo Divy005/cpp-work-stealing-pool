@@ -55,6 +55,7 @@ enable_testing()
 add_executable(wsp_tests
   tests/test_global_queue_pool.cpp
   tests/test_intrusive_deque.cpp
+  tests/test_chase_lev_deque.cpp
   tests/test_work_stealing_pool.cpp
 )
 target_link_libraries(wsp_tests PRIVATE wsp gtest_main)

@@ -208,13 +208,22 @@ lock acquisition, amortizing the synchronization cost; the thief runs one and
 pushes the rest onto its own deque. This is the main throughput lever for the
 heavy-external-production patterns.
 
-### 4.6 Lock-free Chase–Lev deque — capstone (planned, selectable)
-A textbook Chase–Lev deque (atomic `top`/`bottom` over a growable circular array)
-behind a selector, default off. Every atomic carries an inline memory-ordering
-justification; the single-element pop-vs-steal race is resolved by the standard
-CAS-on-`top`. Because TSan runs on Linux (not the Windows dev box), it ships with
-an exact-count race-stress test that catches lost/duplicated nodes functionally,
-and is validated under TSan before `v2` is tagged.
+### 4.6 Lock-free Chase–Lev deque — capstone (implemented, standalone)
+`include/wsp/chase_lev_deque.hpp` is a textbook Chase–Lev deque: atomic
+`top`/`bottom` over a **fixed-capacity** ring (push returns false when full,
+matching `IntrusiveDeque` so the pool's overflow path is the natural fallback).
+Fixed capacity deliberately sidesteps the growable-array memory-reclamation
+hazard — a slot is never overwritten while a thief might still read it, so stored
+pointers stay valid and there is no ABA. The single-element pop-vs-steal tie is
+resolved by the standard `seq_cst` CAS on `top`, and every atomic carries an
+inline memory-ordering justification.
+
+It is a self-contained demonstration of the lock-free technique; the pool keeps
+the lock-based `IntrusiveDeque` (with batch stealing, §4.5) as its default,
+locally-verifiable path. Because TSan does not run on the Windows dev box,
+correctness is checked by an exact-count owner-vs-thieves stress test (which
+catches any lost or duplicated node — a double-take double-frees, a loss shows as
+a short count) and is gated under TSan on Linux before `v2` is tagged.
 
 ### 4.7 Memory-ordering strategy
 `relaxed` for the producer side of `pending_` where a mutex already orders it;
